@@ -1,7 +1,7 @@
 env:
   - GO111MODULE=on
   - CGO_ENABLED=0
-  - GITHUB_ORG=GoFirmex
+  - GITHUB_ORG=gofirmex
   - DOCKER_ORG=listmonk
 
 before:
