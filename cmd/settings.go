@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strings"
@@ -14,9 +16,10 @@ import (
 	"github.com/gdgvda/cron"
 	"github.com/gofrs/uuid/v5"
 	"github.com/jmoiron/sqlx/types"
-	"github.com/knadh/koanf/parsers/json"
+	koanfjson "github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
+	"github.com/knadh/listmonk/internal/auth"
 	"github.com/knadh/listmonk/internal/messenger/email"
 	"github.com/knadh/listmonk/internal/notifs"
 	"github.com/knadh/listmonk/models"
@@ -73,7 +76,8 @@ func (a *App) GetSettings(c echo.Context) error {
 	s.SendgridKey = strings.Repeat(pwdMask, utf8.RuneCountInString(s.SendgridKey))
 	s.BouncePostmark.Password = strings.Repeat(pwdMask, utf8.RuneCountInString(s.BouncePostmark.Password))
 	s.BounceForwardEmail.Key = strings.Repeat(pwdMask, utf8.RuneCountInString(s.BounceForwardEmail.Key))
-	s.SecurityCaptchaSecret = strings.Repeat(pwdMask, utf8.RuneCountInString(s.SecurityCaptchaSecret))
+	s.BounceLettermint.Key = strings.Repeat(pwdMask, utf8.RuneCountInString(s.BounceLettermint.Key))
+	s.SecurityCaptcha.HCaptcha.Secret = strings.Repeat(pwdMask, utf8.RuneCountInString(s.SecurityCaptcha.HCaptcha.Secret))
 	s.OIDC.ClientSecret = strings.Repeat(pwdMask, utf8.RuneCountInString(s.OIDC.ClientSecret))
 
 	return c.JSON(http.StatusOK, okResp{s})
@@ -219,11 +223,22 @@ func (a *App) UpdateSettings(c echo.Context) error {
 	if set.BounceForwardEmail.Key == "" {
 		set.BounceForwardEmail.Key = cur.BounceForwardEmail.Key
 	}
-	if set.SecurityCaptchaSecret == "" {
-		set.SecurityCaptchaSecret = cur.SecurityCaptchaSecret
+	if set.BounceLettermint.Key == "" {
+		set.BounceLettermint.Key = cur.BounceLettermint.Key
+	}
+	if set.SecurityCaptcha.HCaptcha.Secret == "" {
+		set.SecurityCaptcha.HCaptcha.Secret = cur.SecurityCaptcha.HCaptcha.Secret
 	}
 	if set.OIDC.ClientSecret == "" {
 		set.OIDC.ClientSecret = cur.OIDC.ClientSecret
+	}
+
+	// OIDC user auto-creation is enabled. Validate.
+	if set.OIDC.AutoCreateUsers {
+		if set.OIDC.DefaultUserRoleID.Int < auth.SuperAdminRoleID {
+			return echo.NewHTTPError(http.StatusBadRequest,
+				a.i18n.Ts("globals.messages.invalidFields", "name", a.i18n.T("settings.security.OIDCDefaultRole")))
+		}
 	}
 
 	for n, v := range set.UploadExtensions {
@@ -247,6 +262,27 @@ func (a *App) UpdateSettings(c echo.Context) error {
 	}
 	set.DomainAllowlist = doms
 
+	// Validate and clean CORS domains.
+	cors := make([]string, 0, len(set.SecurityCORSOrigins))
+	for _, d := range set.SecurityCORSOrigins {
+		if d = strings.TrimSpace(d); d != "" {
+			if d == "*" {
+				cors = append(cors, d)
+				continue
+			}
+
+			// Parse and validate the URL.
+			u, err := url.Parse(d)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return echo.NewHTTPError(http.StatusBadRequest,
+					a.i18n.Ts("globals.messages.invalidData")+": invalid CORS domain: "+d)
+			}
+			// Save clean scheme + host
+			cors = append(cors, u.Scheme+"://"+u.Host)
+		}
+	}
+	set.SecurityCORSOrigins = cors
+
 	// Validate slow query caching cron.
 	if set.CacheSlowQueries {
 		if _, err := cron.ParseStandard(set.CacheSlowQueriesInterval); err != nil {
@@ -259,6 +295,33 @@ func (a *App) UpdateSettings(c echo.Context) error {
 		return err
 	}
 
+	return a.handleSettingsRestart(c)
+}
+
+// UpdateSettingsByKey updates a single setting key-value in the DB.
+func (a *App) UpdateSettingsByKey(c echo.Context) error {
+	key := c.Param("key")
+	if key == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
+	}
+
+	// Read the raw JSON body as the value.
+	var b json.RawMessage
+	if err := c.Bind(&b); err != nil {
+		return err
+	}
+
+	// Update the value in the DB.
+	if err := a.core.UpdateSettingsByKey(key, b); err != nil {
+		return err
+	}
+
+	return a.handleSettingsRestart(c)
+}
+
+// handleSettingsRestart checks for running campaigns and either triggers an
+// immediate app restart or marks the app as needing a restart.
+func (a *App) handleSettingsRestart(c echo.Context) error {
 	// If there are any active campaigns, don't do an auto reload and
 	// warn the user on the frontend.
 	if a.manager.HasRunningCampaigns() {
@@ -271,7 +334,7 @@ func (a *App) UpdateSettings(c echo.Context) error {
 		}{true}})
 	}
 
-	// No running campaigns. Reload the a.
+	// No running campaigns. Reload the app.
 	go func() {
 		<-time.After(time.Millisecond * 500)
 		a.chReload <- syscall.SIGHUP
@@ -296,7 +359,7 @@ func (a *App) TestSMTPSettings(c echo.Context) error {
 
 	// Load the JSON into koanf to parse SMTP settings properly including timestrings.
 	ko := koanf.New(".")
-	if err := ko.Load(rawbytes.Provider(reqBody), json.Parser()); err != nil {
+	if err := ko.Load(rawbytes.Provider(reqBody), koanfjson.Parser()); err != nil {
 		a.log.Printf("error unmarshalling SMTP test request: %v", err)
 		return echo.NewHTTPError(http.StatusBadRequest, a.i18n.Ts("globals.messages.internalError"))
 	}

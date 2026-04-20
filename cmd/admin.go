@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/knadh/listmonk/internal/captcha"
 	"github.com/labstack/echo/v4"
 	null "gopkg.in/volatiletech/null.v6"
 )
@@ -15,10 +16,17 @@ type serverConfig struct {
 	RootURL            string `json:"root_url"`
 	FromEmail          string `json:"from_email"`
 	PublicSubscription struct {
-		Enabled        bool        `json:"enabled"`
-		CaptchaEnabled bool        `json:"captcha_enabled"`
-		CaptchaKey     null.String `json:"captcha_key"`
+		Enabled          bool        `json:"enabled"`
+		CaptchaEnabled   bool        `json:"captcha_enabled"`
+		CaptchaProvider  null.String `json:"captcha_provider"`
+		CaptchaKey       null.String `json:"captcha_key"`
+		AltchaComplexity int         `json:"altcha_complexity"`
 	} `json:"public_subscription"`
+	Privacy struct {
+		DisableTracking    bool `json:"disable_tracking"`
+		IndividualTracking bool `json:"individual_tracking"`
+	} `json:"privacy"`
+	MediaProvider string          `json:"media_provider"`
 	Messengers    []string        `json:"messengers"`
 	Langs         []i18nLang      `json:"langs"`
 	Lang          string          `json:"lang"`
@@ -37,12 +45,28 @@ func (a *App) GetServerConfig(c echo.Context) error {
 		Lang:          a.cfg.Lang,
 		Permissions:   a.cfg.PermissionsRaw,
 		HasLegacyUser: a.cfg.HasLegacyUser,
+		Privacy: struct {
+			DisableTracking    bool `json:"disable_tracking"`
+			IndividualTracking bool `json:"individual_tracking"`
+		}{
+			DisableTracking:    a.cfg.Privacy.DisableTracking,
+			IndividualTracking: a.cfg.Privacy.IndividualTracking,
+		},
 	}
 	out.PublicSubscription.Enabled = a.cfg.EnablePublicSubPage
-	if a.cfg.Security.EnableCaptcha {
+
+	// CAPTCHA.
+	if a.cfg.Security.Captcha.Altcha.Enabled {
 		out.PublicSubscription.CaptchaEnabled = true
-		out.PublicSubscription.CaptchaKey = null.StringFrom(a.cfg.Security.CaptchaKey)
+		out.PublicSubscription.CaptchaProvider = null.StringFrom(captcha.ProviderAltcha)
+		out.PublicSubscription.AltchaComplexity = a.cfg.Security.Captcha.Altcha.Complexity
+	} else if a.cfg.Security.Captcha.HCaptcha.Enabled {
+		out.PublicSubscription.CaptchaEnabled = true
+		out.PublicSubscription.CaptchaProvider = null.StringFrom(captcha.ProviderHCaptcha)
+		out.PublicSubscription.CaptchaKey = null.StringFrom(a.cfg.Security.Captcha.HCaptcha.Key)
 	}
+
+	out.MediaProvider = a.cfg.MediaUpload.Provider
 
 	// Language list.
 	langList, err := getI18nLangList(a.fs)

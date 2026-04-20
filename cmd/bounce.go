@@ -86,7 +86,7 @@ func (a *App) DeleteBounces(c echo.Context) error {
 	}
 
 	// Delete bounces from the DB.
-	if err := a.core.DeleteBounces(ids); err != nil {
+	if err := a.core.DeleteBounces(ids, all); err != nil {
 		return err
 	}
 
@@ -97,7 +97,16 @@ func (a *App) DeleteBounces(c echo.Context) error {
 func (a *App) DeleteBounce(c echo.Context) error {
 	// Delete bounces from the DB.
 	id := getID(c)
-	if err := a.core.DeleteBounces([]int{id}); err != nil {
+	if err := a.core.DeleteBounces([]int{id}, false); err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, okResp{true})
+}
+
+// BlocklistBouncedSubscribers handles blocklisting of all bounced subscribers.
+func (a *App) BlocklistBouncedSubscribers(c echo.Context) error {
+	if err := a.core.BlocklistBouncedSubscribers(); err != nil {
 		return err
 	}
 
@@ -143,7 +152,7 @@ func (a *App) BounceWebhook(c echo.Context) error {
 		bounces = append(bounces, b)
 
 	// Amazon SES.
-	case service == "ses" && a.cfg.BounceSESEnabled:
+	case service == "ses" && a.bounce.SES != nil:
 		switch c.Request().Header.Get("X-Amz-Sns-Message-Type") {
 		// SNS webhook registration confirmation. Only after these are processed will the endpoint
 		// start getting bounce notifications.
@@ -167,7 +176,7 @@ func (a *App) BounceWebhook(c echo.Context) error {
 		}
 
 	// SendGrid.
-	case service == "sendgrid" && a.cfg.BounceSendgridEnabled:
+	case service == "sendgrid" && a.bounce.Sendgrid != nil:
 		var (
 			sig = c.Request().Header.Get("X-Twilio-Email-Event-Webhook-Signature")
 			ts  = c.Request().Header.Get("X-Twilio-Email-Event-Webhook-Timestamp")
@@ -182,7 +191,7 @@ func (a *App) BounceWebhook(c echo.Context) error {
 		bounces = append(bounces, bs...)
 
 	// Postmark.
-	case service == "postmark" && a.cfg.BouncePostmarkEnabled:
+	case service == "postmark" && a.bounce.Postmark != nil:
 		bs, err := a.bounce.Postmark.ProcessBounce(rawReq, c)
 		if err != nil {
 			a.log.Printf("error processing postmark notification: %v", err)
@@ -195,7 +204,7 @@ func (a *App) BounceWebhook(c echo.Context) error {
 		bounces = append(bounces, bs...)
 
 	// ForwardEmail.
-	case service == "forwardemail" && a.cfg.BounceForwardemailEnabled:
+	case service == "forwardemail" && a.bounce.Forwardemail != nil:
 		var (
 			sig = c.Request().Header.Get("X-Webhook-Signature")
 		)
@@ -203,6 +212,20 @@ func (a *App) BounceWebhook(c echo.Context) error {
 		bs, err := a.bounce.Forwardemail.ProcessBounce(sig, rawReq)
 		if err != nil {
 			a.log.Printf("error processing forwardemail notification: %v", err)
+			if _, ok := err.(*echo.HTTPError); ok {
+				return err
+			}
+
+			return echo.NewHTTPError(http.StatusBadRequest, a.i18n.T("globals.messages.invalidData"))
+		}
+		bounces = append(bounces, bs...)
+
+	// Lettermint.
+	case service == "lettermint" && a.bounce.Lettermint != nil:
+		sig := c.Request().Header.Get("X-Lettermint-Signature")
+		bs, err := a.bounce.Lettermint.ProcessBounce(sig, rawReq)
+		if err != nil {
+			a.log.Printf("error processing lettermint notification: %v", err)
 			if _, ok := err.(*echo.HTTPError); ok {
 				return err
 			}

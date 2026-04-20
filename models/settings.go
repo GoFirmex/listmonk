@@ -1,5 +1,7 @@
 package models
 
+import "gopkg.in/volatiletech/null.v6"
+
 // Settings represents the app settings stored in the DB.
 type Settings struct {
 	AppSiteName                   string   `json:"app.site_name"`
@@ -27,6 +29,7 @@ type Settings struct {
 	AppMessageSlidingWindowRate     int    `json:"app.message_sliding_window_rate"`
 
 	PrivacyIndividualTracking bool     `json:"privacy.individual_tracking"`
+	PrivacyDisableTracking   bool     `json:"privacy.disable_tracking"`
 	PrivacyUnsubHeader        bool     `json:"privacy.unsubscribe_header"`
 	PrivacyAllowBlocklist     bool     `json:"privacy.allow_blocklist"`
 	PrivacyAllowPreferences   bool     `json:"privacy.allow_preferences"`
@@ -37,17 +40,30 @@ type Settings struct {
 	DomainBlocklist           []string `json:"privacy.domain_blocklist"`
 	DomainAllowlist           []string `json:"privacy.domain_allowlist"`
 
-	SecurityEnableCaptcha bool   `json:"security.enable_captcha"`
-	SecurityCaptchaKey    string `json:"security.captcha_key"`
-	SecurityCaptchaSecret string `json:"security.captcha_secret"`
+	SecurityCaptcha struct {
+		Altcha struct {
+			Enabled    bool `json:"enabled"`
+			Complexity int  `json:"complexity"`
+		} `json:"altcha"`
+		HCaptcha struct {
+			Enabled bool   `json:"enabled"`
+			Key     string `json:"key"`
+			Secret  string `json:"secret"`
+		} `json:"hcaptcha"`
+	} `json:"security.captcha"`
 
 	OIDC struct {
-		Enabled      bool   `json:"enabled"`
-		ProviderURL  string `json:"provider_url"`
-		ProviderName string `json:"provider_name"`
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
+		Enabled           bool     `json:"enabled"`
+		ProviderURL       string   `json:"provider_url"`
+		ProviderName      string   `json:"provider_name"`
+		ClientID          string   `json:"client_id"`
+		ClientSecret      string   `json:"client_secret"`
+		AutoCreateUsers   bool     `json:"auto_create_users"`
+		DefaultUserRoleID null.Int `json:"default_user_role_id"`
+		DefaultListRoleID null.Int `json:"default_list_role_id"`
 	} `json:"security.oidc"`
+
+	SecurityCORSOrigins []string `json:"security.cors_origins"`
 
 	UploadProvider             string   `json:"upload.provider"`
 	UploadExtensions           []string `json:"upload.extensions"`
@@ -113,6 +129,10 @@ type Settings struct {
 		Enabled bool   `json:"enabled"`
 		Key     string `json:"key"`
 	} `json:"bounce.forwardemail"`
+	BounceLettermint struct {
+		Enabled bool   `json:"enabled"`
+		Key     string `json:"key"`
+	} `json:"bounce.lettermint"`
 	BounceBoxes []struct {
 		UUID          string `json:"uuid"`
 		Enabled       bool   `json:"enabled"`
@@ -127,6 +147,11 @@ type Settings struct {
 		TLSSkipVerify bool   `json:"tls_skip_verify"`
 		ScanInterval  string `json:"scan_interval"`
 	} `json:"bounce.mailboxes"`
+
+	MaintenanceDB struct {
+		Vacuum         bool   `json:"vacuum"`
+		VacuumInterval string `json:"vacuum_cron_interval"`
+	} `json:"maintenance.db"`
 
 	AdminCustomCSS  string `json:"appearance.admin.custom_css"`
 	AdminCustomJS   string `json:"appearance.admin.custom_js"`

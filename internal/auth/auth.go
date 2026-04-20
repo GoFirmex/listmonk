@@ -35,18 +35,23 @@ func (bit *StringOrBoolean) UnmarshalJSON(data []byte) error {
 }
 
 type OIDCclaim struct {
-	Email         string          `json:"email"`
+	Email             string `json:"email"`
 	EmailVerified StringOrBoolean `json:"email_verified"`
-	Sub           string          `json:"sub"`
-	Picture       string          `json:"picture"`
+	Sub               string `json:"sub"`
+	Picture           string `json:"picture"`
+	Name              string `json:"name"`
+	PreferredUsername string `json:"preferred_username"`
 }
 
 type OIDCConfig struct {
-	Enabled      bool   `json:"enabled"`
-	ProviderURL  string `json:"provider_url"`
-	RedirectURL  string `json:"redirect_url"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
+	Enabled           bool   `json:"enabled"`
+	ProviderURL       string `json:"provider_url"`
+	RedirectURL       string `json:"redirect_url"`
+	ClientID          string `json:"client_id"`
+	ClientSecret      string `json:"client_secret"`
+	AutoCreateUsers   bool   `json:"auto_create_users"`
+	DefaultUserRoleID int    `json:"default_user_role_id"`
+	DefaultListRoleID int    `json:"default_list_role_id"`
 }
 
 type BasicAuthConfig struct {
@@ -91,28 +96,6 @@ func New(cfg Config, db *sql.DB, cb *Callbacks, lo *log.Logger) (*Auth, error) {
 		log: lo,
 
 		apiUsers: map[string]User{},
-	}
-
-	// Initialize OIDC.
-	if cfg.OIDC.Enabled {
-		provider, err := oidc.NewProvider(context.Background(), cfg.OIDC.ProviderURL)
-		if err != nil {
-			cfg.OIDC.Enabled = false
-			lo.Printf("error initializing OIDC OAuth provider: %v", err)
-		} else {
-			a.verifier = provider.Verifier(&oidc.Config{
-				ClientID: cfg.OIDC.ClientID,
-			})
-
-			a.oauthCfg = oauth2.Config{
-				ClientID:     cfg.OIDC.ClientID,
-				ClientSecret: cfg.OIDC.ClientSecret,
-				Endpoint:     provider.Endpoint(),
-				RedirectURL:  cfg.OIDC.RedirectURL,
-				Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
-			}
-			a.provider = provider
-		}
 	}
 
 	// Initialize session manager.
@@ -176,15 +159,91 @@ func (o *Auth) GetAPIToken(user string, token string) (User, bool) {
 	return t, true
 }
 
+// initOIDC initializes the OIDC provider, verifier, and OAuth config.
+func (o *Auth) initOIDC() error {
+	if !o.cfg.OIDC.Enabled {
+		return fmt.Errorf("OIDC is not enabled")
+	}
+
+	provider, err := oidc.NewProvider(context.Background(), o.cfg.OIDC.ProviderURL)
+	if err != nil {
+		return fmt.Errorf("error initializing OIDC OAuth provider: %v", err)
+	}
+
+	o.verifier = provider.Verifier(&oidc.Config{
+		ClientID: o.cfg.OIDC.ClientID,
+	})
+
+	o.oauthCfg = oauth2.Config{
+		ClientID:     o.cfg.OIDC.ClientID,
+		ClientSecret: o.cfg.OIDC.ClientSecret,
+		Endpoint:     provider.Endpoint(),
+		RedirectURL:  o.cfg.OIDC.RedirectURL,
+		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
+	}
+	o.provider = provider
+
+	return nil
+}
+
+// getProvider returns the OIDC provider, initializing it if necessary.
+func (o *Auth) getProvider() (*oidc.Provider, error) {
+	o.Lock()
+	defer o.Unlock()
+
+	if o.provider == nil {
+		if err := o.initOIDC(); err != nil {
+			return nil, err
+		}
+	}
+	return o.provider, nil
+}
+
+// getVerifier returns the OIDC verifier, initializing it if necessary.
+func (o *Auth) getVerifier() (*oidc.IDTokenVerifier, error) {
+	o.Lock()
+	defer o.Unlock()
+
+	if o.verifier == nil {
+		if err := o.initOIDC(); err != nil {
+			return nil, err
+		}
+	}
+	return o.verifier, nil
+}
+
+// getOAuthConfig returns the OAuth config, initializing it if necessary.
+func (o *Auth) getOAuthConfig() (*oauth2.Config, error) {
+	o.Lock()
+	defer o.Unlock()
+
+	if o.oauthCfg.ClientID == "" {
+		if err := o.initOIDC(); err != nil {
+			return nil, err
+		}
+	}
+	return &o.oauthCfg, nil
+}
+
 // GetOIDCAuthURL returns the OIDC provider's auth URL to redirect to.
 func (o *Auth) GetOIDCAuthURL(state, nonce string) string {
-	return o.oauthCfg.AuthCodeURL(state, oidc.Nonce(nonce))
+	cfg, err := o.getOAuthConfig()
+	if err != nil {
+		o.log.Printf("error getting OAuth config: %v", err)
+		return ""
+	}
+	return cfg.AuthCodeURL(state, oidc.Nonce(nonce))
 }
 
 // ExchangeOIDCToken takes an OIDC authorization code (recieved via redirect from the OIDC provider),
 // validates it, and returns an OIDC token for subsequent auth.
 func (o *Auth) ExchangeOIDCToken(code, nonce string) (string, OIDCclaim, error) {
-	tk, err := o.oauthCfg.Exchange(context.TODO(), code)
+	cfg, err := o.getOAuthConfig()
+	if err != nil {
+		return "", OIDCclaim{}, echo.NewHTTPError(http.StatusUnauthorized, fmt.Sprintf("error getting OAuth config: %v", err))
+	}
+
+	tk, err := cfg.Exchange(context.TODO(), code)
 	if err != nil {
 		return "", OIDCclaim{}, echo.NewHTTPError(http.StatusUnauthorized, fmt.Sprintf("error exchanging token: %v", err))
 	}
@@ -194,7 +253,12 @@ func (o *Auth) ExchangeOIDCToken(code, nonce string) (string, OIDCclaim, error) 
 		return "", OIDCclaim{}, echo.NewHTTPError(http.StatusUnauthorized, "`id_token` missing.")
 	}
 
-	idTk, err := o.verifier.Verify(context.TODO(), rawIDTk)
+	verifier, err := o.getVerifier()
+	if err != nil {
+		return "", OIDCclaim{}, echo.NewHTTPError(http.StatusUnauthorized, fmt.Sprintf("error getting verifier: %v", err))
+	}
+
+	idTk, err := verifier.Verify(context.TODO(), rawIDTk)
 	if err != nil {
 		return "", OIDCclaim{}, echo.NewHTTPError(http.StatusUnauthorized, fmt.Sprintf("error verifying ID token: %v", err))
 	}
@@ -210,7 +274,12 @@ func (o *Auth) ExchangeOIDCToken(code, nonce string) (string, OIDCclaim, error) 
 
 	// If claims doesn't have the e-mail, attempt to fetch it from the userinfo endpoint.
 	if claims.Email == "" {
-		userInfo, err := o.provider.UserInfo(context.TODO(), oauth2.StaticTokenSource(tk))
+		provider, err := o.getProvider()
+		if err != nil {
+			return "", OIDCclaim{}, fmt.Errorf("error getting provider: %v", err)
+		}
+
+		userInfo, err := provider.UserInfo(context.TODO(), oauth2.StaticTokenSource(tk))
 		if err != nil {
 			return "", OIDCclaim{}, errors.New("error fetching user info from OIDC")
 		}
@@ -327,6 +396,16 @@ func (o *Auth) SaveSession(u User, oidcToken string, c echo.Context) error {
 	return nil
 }
 
+// GetSessionID returns the current session ID from the echo context.
+func GetSessionID(c echo.Context) string {
+	sess, ok := c.Get(SessionKey).(*simplesessions.Session)
+	if !ok || sess == nil {
+		return ""
+	}
+
+	return sess.ID()
+}
+
 // validateSession checks if the cookie session is valid (in the DB) and returns the session and user details.
 func (o *Auth) validateSession(c echo.Context) (*simplesessions.Session, User, error) {
 	// Cookie session.
@@ -345,7 +424,7 @@ func (o *Auth) validateSession(c echo.Context) (*simplesessions.Session, User, e
 	userID, err := o.sessStore.Int(vars["user_id"], nil)
 	if err != nil || userID < 1 {
 		o.log.Printf("error fetching session user ID: %v", err)
-		return nil, User{}, echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+		return nil, User{}, echo.NewHTTPError(http.StatusInternalServerError, "invalid session.")
 	}
 
 	// Fetch user details from the database.

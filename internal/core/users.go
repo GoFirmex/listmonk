@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/knadh/listmonk/internal/auth"
 	"github.com/knadh/listmonk/internal/utils"
@@ -27,7 +28,7 @@ func (c *Core) GetUser(id int, username, email string) (auth.User, error) {
 	var out auth.User
 	if err := c.q.GetUser.Get(&out, id, username, email); err != nil {
 		if err == sql.ErrNoRows {
-			return out, echo.NewHTTPError(http.StatusInternalServerError,
+			return out, echo.NewHTTPError(http.StatusNotFound,
 				c.i18n.Ts("globals.messages.notFound", "name", "{globals.terms.user}"))
 
 		}
@@ -122,6 +123,25 @@ func (c *Core) UpdateUserLogin(id int, avatar string) error {
 	return nil
 }
 
+// SetTwoFA sets or clears the 2FA configuration for a user.
+func (c *Core) SetTwoFA(id int, twofaType, twofaKey string) error {
+	if _, err := c.q.SetUserTwoFA.Exec(id, twofaType, twofaKey); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError,
+			c.i18n.Ts("globals.messages.errorUpdating", "name", "{globals.terms.user}", "error", pqErrMsg(err)))
+	}
+
+	return nil
+}
+
+// DeleteUserSessions deletes all sessions for a given user ID, optionally
+// excluding a specific session ID (to keep the current session alive).
+func (c *Core) DeleteUserSessions(userID int, excludeID string) error {
+	if _, err := c.q.DeleteUserSessions.Exec(strconv.Itoa(userID), excludeID); err != nil {
+		return err
+	}
+	return nil
+}
+
 // DeleteUsers deletes a given user.
 func (c *Core) DeleteUsers(ids []int) error {
 	res, err := c.q.DeleteUsers.Exec(pq.Array(ids))
@@ -141,8 +161,7 @@ func (c *Core) LoginUser(username, password string) (auth.User, error) {
 	var out auth.User
 	if err := c.q.LoginUser.Get(&out, username, password); err != nil {
 		if err == sql.ErrNoRows {
-			return out, echo.NewHTTPError(http.StatusForbidden,
-				c.i18n.T("users.invalidLogin"))
+			return out, echo.NewHTTPError(http.StatusForbidden, c.i18n.T("users.invalidLogin"))
 		}
 
 		return out, echo.NewHTTPError(http.StatusInternalServerError,
