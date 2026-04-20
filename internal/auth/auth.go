@@ -35,12 +35,12 @@ func (bit *StringOrBoolean) UnmarshalJSON(data []byte) error {
 }
 
 type OIDCclaim struct {
-	Email             string `json:"email"`
-	EmailVerified StringOrBoolean `json:"email_verified"`
-	Sub               string `json:"sub"`
-	Picture           string `json:"picture"`
-	Name              string `json:"name"`
-	PreferredUsername string `json:"preferred_username"`
+	Email             string          `json:"email"`
+	EmailVerified     StringOrBoolean `json:"email_verified"`
+	Sub               string          `json:"sub"`
+	Picture           string          `json:"picture"`
+	Name              string          `json:"name"`
+	PreferredUsername string          `json:"preferred_username"`
 }
 
 type OIDCConfig struct {
